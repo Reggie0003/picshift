@@ -1,0 +1,580 @@
+// =============================================================================
+// Pic Shift — Prisma schema
+// =============================================================================
+// Multi-tenant HR SaaS. Every business table carries `organizationId` and is
+// indexed by it. Application code MUST always filter by org context; Postgres
+// row-level-security policies (see migrations) enforce this as defence-in-depth.
+//
+// PII columns (Ghana Card, SSNIT, TIN, BVN, NIN, addresses, bank accounts,
+// MoMo numbers) are stored as ciphertext (string) — encrypted in app code via
+// lib/crypto.ts before write, decrypted after read. Searchable hashes live in
+// `*_hash` columns for equality lookups.
+//
+// pgcrypto + pgvector + citext extensions are enabled in migration 0001.
+// =============================================================================
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  extensions = [pgcrypto, citext]
+}
+
+// --- Enums --------------------------------------------------------------------
+
+enum AppRole {
+  super_admin
+  org_owner
+  hr_admin
+  payroll_admin
+  manager
+  employee
+}
+
+enum EmployeeStatus {
+  pending
+  active
+  on_leave
+  suspended
+  terminated
+}
+
+enum EmploymentType {
+  full_time
+  part_time
+  contractor
+  intern
+  temporary
+}
+
+enum PayFrequency {
+  weekly
+  biweekly
+  monthly
+  quarterly
+}
+
+enum PtoRequestStatus {
+  pending
+  approved
+  rejected
+  cancelled
+}
+
+enum PtoCategory {
+  annual
+  sick
+  maternity
+  paternity
+  bereavement
+  unpaid
+  study
+  other
+}
+
+enum ShiftStatus {
+  open
+  claimed
+  assigned
+  completed
+  cancelled
+}
+
+enum DocumentCategory {
+  id_document
+  contract
+  payslip
+  tax_form
+  certificate
+  policy
+  other
+}
+
+enum AuditAction {
+  create
+  update
+  delete
+  login
+  logout
+  login_failed
+  mfa_enrolled
+  mfa_verified
+  permission_change
+  password_reset
+  data_export
+  data_erasure
+  payroll_run
+  payment_dispatched
+  webhook_received
+  consent_granted
+  consent_revoked
+}
+
+enum ConsentType {
+  privacy_policy
+  terms_of_service
+  data_processing
+  payroll_disbursement
+  marketing
+}
+
+// --- Core tenancy & identity --------------------------------------------------
+
+model Organization {
+  id              String   @id @default(cuid())
+  name            String
+  slug            String   @unique
+  country         String   @default("GH") // ISO-3166 alpha-2: GH | NG | ...
+  timezone        String   @default("Africa/Accra")
+  baseCurrency    String   @default("GHS") // GHS | NGN | USD ...
+  registeredName  String?
+  taxId           String?  // Ghana TIN or Nigeria CAC RC number
+  industry        String?
+  status          String   @default("active") // active | suspended | trial
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  users          User[]
+  employees      EmployeeProfile[]
+  ptoPolicies    PtoPolicy[]
+  ptoRequests    PtoRequest[]
+  shifts         Shift[]
+  documents      Document[]
+  auditLog       AuditLogEntry[]
+  consents       ConsentRecord[]
+  webhookEndpoints WebhookEndpoint[]
+  payrollRuns    PayrollRun[]
+
+  @@index([country])
+  @@map("organizations")
+}
+
+model User {
+  id                String   @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email             String   @db.Citext
+  passwordHash      String
+  fullName          String
+  status            String   @default("active") // active | locked | invited | disabled
+  emailVerifiedAt   DateTime?
+  mfaEnrolledAt     DateTime?
+  mfaSecretEnc      String?  // encrypted TOTP secret
+  lastLoginAt       DateTime?
+  lastLoginIp       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  roles       RoleAssignment[]
+  sessions    Session[]
+  employee    EmployeeProfile?
+  ptoApprovedBy PtoRequest[] @relation("PtoApprover")
+  ptoRequestedBy PtoRequest[] @relation("PtoRequester")
+  shiftsCreated Shift[]    @relation("ShiftCreator")
+  shiftsAssigned Shift[]   @relation("ShiftAssignee")
+  documentsUploaded Document[] @relation("DocumentUploader")
+  consents    ConsentRecord[]
+  auditEntries AuditLogEntry[] @relation("AuditActor")
+
+  @@unique([organizationId, email])
+  @@index([organizationId])
+  @@map("users")
+}
+
+model RoleAssignment {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  role           AppRole
+  grantedAt      DateTime @default(now())
+  grantedBy      String?  // userId who granted
+
+  @@unique([userId, organizationId, role])
+  @@index([organizationId, role])
+  @@map("role_assignments")
+}
+
+model Session {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokenHash String  @unique // sha256 of the refresh token
+  ipAddress       String?
+  userAgent       String?
+  deviceFingerprint String?
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime
+  revokedAt       DateTime?
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// --- Employee data ------------------------------------------------------------
+
+model EmployeeProfile {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId          String?  @unique
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  employeeNumber  String   // e.g. PS-2026-0001
+  firstName       String
+  lastName        String
+  preferredName   String?
+  workEmail       String?  @db.Citext
+  workPhone       String?
+
+  // Encrypted PII (envelope encryption via lib/crypto.ts)
+  ghanaCardEnc    String?  // GHA-XXXXXXXXX-X (Ghana)
+  ghanaCardHash   String?  // searchable hash
+  ssnitNumberEnc  String?  // Social Security and National Insurance Trust (Ghana)
+  ssnitNumberHash String?
+  tinEnc          String?  // Tax Identification Number (Ghana)
+  tinHash         String?
+  bvnEnc          String?  // Bank Verification Number (Nigeria) — 11 digits
+  bvnHash         String?
+  ninEnc          String?  // National Identification Number (Nigeria)
+  ninHash         String?
+  passportEnc     String?
+  passportHash    String?
+  dobEnc          String?  // ISO date string, encrypted
+  addressEnc      String?  // free-form, encrypted
+  emergencyContactEnc String?
+
+  // Banking (encrypted)
+  bankName        String?
+  bankAccountEnc  String?
+  bankAccountHash String?
+  bankBranch      String?
+  swiftCode       String?
+
+  // Mobile money (encrypted) — Ghana / Nigeria
+  momoProvider    String?  // mtn | vodafone | airteltigo | mpesa
+  momoNumberEnc   String?
+  momoNumberHash  String?
+
+  employmentType  EmploymentType  @default(full_time)
+  status          EmployeeStatus  @default(pending)
+  jobTitle        String?
+  department      String?
+  managerId       String?
+  hiredAt         DateTime?
+  terminatedAt    DateTime?
+  terminationReason String?
+
+  baseSalaryMinor BigInt?  // stored in minor units (pesewas/kobo) to avoid float
+  payFrequency    PayFrequency @default(monthly)
+  currency        String   @default("GHS")
+
+  // Compliance flags
+  hasSignedContract Boolean @default(false)
+  hasCompletedOnboarding Boolean @default(false)
+  rightToWorkVerified Boolean @default(false)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime? // soft-delete for right-to-erasure
+
+  documents       Document[]
+  ptoBalances     PtoBalance[]
+  ptoRequests     PtoRequest[]
+  payrollItems    PayrollItem[]
+  shifts          Shift[]
+
+  @@unique([organizationId, employeeNumber])
+  @@index([organizationId, status])
+  @@index([organizationId, managerId])
+  @@index([ghanaCardHash])
+  @@index([ssnitNumberHash])
+  @@index([bvnHash])
+  @@map("employee_profiles")
+}
+
+// --- PTO ----------------------------------------------------------------------
+
+model PtoPolicy {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name            String
+  category        PtoCategory
+  // Ghana Labour Act 2003 (Act 651) §20: minimum 15 working days annual leave
+  // after 12 months. Maternity: 12 weeks paid (§57). Sick: paid days vary.
+  defaultDaysPerYear Decimal @default(15) @db.Decimal(6, 2)
+  accrualMethod   String   @default("anniversary") // anniversary | calendar | per_pay_period
+  carryOverDays   Decimal  @default(0) @db.Decimal(6, 2)
+  maxBalanceDays  Decimal? @db.Decimal(6, 2)
+  requiresApproval Boolean @default(true)
+  appliesToTypes  String[] // ["full_time", "part_time"]
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  balances        PtoBalance[]
+  requests        PtoRequest[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, category])
+  @@map("pto_policies")
+}
+
+model PtoBalance {
+  id              String   @id @default(cuid())
+  employeeId      String
+  employee        EmployeeProfile @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  policyId        String
+  policy          PtoPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  periodStart     DateTime
+  periodEnd       DateTime
+  accruedDays     Decimal  @default(0) @db.Decimal(6, 2)
+  takenDays       Decimal  @default(0) @db.Decimal(6, 2)
+  pendingDays     Decimal  @default(0) @db.Decimal(6, 2)
+  carriedOverDays Decimal  @default(0) @db.Decimal(6, 2)
+  updatedAt       DateTime @updatedAt
+
+  @@unique([employeeId, policyId, periodStart])
+  @@index([employeeId])
+  @@map("pto_balances")
+}
+
+model PtoRequest {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  employeeId      String
+  employee        EmployeeProfile @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  policyId        String
+  policy          PtoPolicy @relation(fields: [policyId], references: [id], onDelete: Restrict)
+  requesterId     String
+  requester       User      @relation("PtoRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  approverId      String?
+  approver        User?     @relation("PtoApprover", fields: [approverId], references: [id], onDelete: SetNull)
+
+  startDate       DateTime
+  endDate         DateTime
+  daysRequested   Decimal  @db.Decimal(6, 2)
+  reason          String?
+  status          PtoRequestStatus @default(pending)
+  decidedAt       DateTime?
+  decisionNote    String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([organizationId, status])
+  @@index([employeeId, status])
+  @@map("pto_requests")
+}
+
+// --- Scheduling / shifts ------------------------------------------------------
+
+model Shift {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  title           String
+  description     String?
+  startTime       DateTime    // UTC
+  endTime         DateTime    // UTC
+  location        String?
+  status          ShiftStatus @default(open)
+
+  createdById     String
+  createdBy       User        @relation("ShiftCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  assignedUserId  String?
+  assignedUser    User?       @relation("ShiftAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  assignedEmployeeId String?
+  assignedEmployee EmployeeProfile? @relation(fields: [assignedEmployeeId], references: [id], onDelete: SetNull)
+
+  clockedInAt     DateTime?
+  clockedOutAt    DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([organizationId, status, startTime])
+  @@index([assignedUserId, startTime])
+  @@map("shifts")
+}
+
+// --- Documents ----------------------------------------------------------------
+
+model Document {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  employeeId      String?
+  employee        EmployeeProfile? @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  uploadedById    String
+  uploadedBy      User     @relation("DocumentUploader", fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  category        DocumentCategory
+  filename        String
+  contentType     String
+  sizeBytes       BigInt
+  s3Key           String   @unique
+  sha256          String   // for integrity verification
+  isEncryptedAtRest Boolean @default(true)
+  retentionUntil  DateTime?
+  scanStatus      String   @default("pending") // pending | clean | infected | error
+  scanCompletedAt DateTime?
+  versionOf       String?  // self-relation — predecessor version
+
+  createdAt       DateTime @default(now())
+  deletedAt       DateTime?
+
+  @@index([organizationId, category])
+  @@index([employeeId])
+  @@map("documents")
+}
+
+// --- Audit & compliance -------------------------------------------------------
+
+model AuditLogEntry {
+  id              String   @id @default(cuid())
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actorId         String?
+  actor           User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  action          AuditAction
+  entityType      String   // "employee" | "pto_request" | "shift" | "document" | ...
+  entityId        String?
+  before          Json?
+  after           Json?
+  ipAddress       String?
+  userAgent       String?
+  requestId       String?
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_log")
+}
+
+model ConsentRecord {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  consentType     ConsentType
+  version         String   // e.g. "2026-05-01-v3"
+  granted         Boolean
+  grantedAt       DateTime?
+  revokedAt       DateTime?
+  ipAddress       String?
+  userAgent       String?
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  @@index([organizationId, userId, consentType])
+  @@map("consent_records")
+}
+
+// --- Webhooks (for Phase 3 payment provider callbacks) ------------------------
+
+model WebhookEndpoint {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  url             String
+  events          String[]
+  secretHash      String   // sha256 of HMAC signing secret
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  deliveries      WebhookDelivery[]
+
+  @@index([organizationId])
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id              String   @id @default(cuid())
+  endpointId      String
+  endpoint        WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  eventType       String
+  payload         Json
+  responseStatus  Int?
+  responseBody    String?
+  attempts        Int      @default(0)
+  deliveredAt     DateTime?
+  failedAt        DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([endpointId, createdAt])
+  @@map("webhook_deliveries")
+}
+
+// --- Payroll (Phase 3 — schema only; calculator implemented; dispatch stubbed) -
+
+model PayrollRun {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  periodStart     DateTime
+  periodEnd       DateTime
+  payDate         DateTime
+  currency        String   @default("GHS")
+  status          String   @default("draft") // draft | calculating | approved | dispatched | failed
+  totalGrossMinor BigInt   @default(0)
+  totalNetMinor   BigInt   @default(0)
+  totalTaxMinor   BigInt   @default(0)
+  approvedById    String?
+  approvedAt      DateTime?
+  dispatchedAt   DateTime?
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  items           PayrollItem[]
+
+  @@unique([organizationId, periodStart, periodEnd])
+  @@index([organizationId, status])
+  @@map("payroll_runs")
+}
+
+model PayrollItem {
+  id              String   @id @default(cuid())
+  runId           String
+  run             PayrollRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  employeeId      String
+  employee        EmployeeProfile @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+
+  // All amounts in minor units (pesewas/kobo)
+  grossMinor      BigInt
+  basicSalaryMinor BigInt
+  allowancesMinor BigInt   @default(0)
+  bonusesMinor    BigInt   @default(0)
+  deductionsMinor BigInt   @default(0)
+
+  // Ghana statutory deductions
+  payeMinor       BigInt   @default(0) // PAYE income tax
+  ssnitTier1Minor BigInt   @default(0) // 13.5% employer
+  ssnitTier2Minor BigInt   @default(0) // 5.0% mandatory occupational pension
+  employeeSsnitMinor BigInt @default(0) // 5.5% employee deduction
+  nhilMinor       BigInt   @default(0) // not on payroll, but tracked
+  reliefsMinor    BigInt   @default(0)
+
+  netMinor        BigInt
+  paidAt          DateTime?
+  paymentReference String?
+  paymentProvider String?  // flutterwave | paystack | mtn_momo | bank_transfer
+
+  breakdown       Json     // full breakdown for audit / payslip rendering
+  createdAt       DateTime @default(now())
+
+  @@unique([runId, employeeId])
+  @@index([employeeId])
+  @@map("payroll_items")
+}

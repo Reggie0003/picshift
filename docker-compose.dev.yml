@@ -1,0 +1,38 @@
+# =============================================================================
+# Local-test override.
+# Wires the web frontend to call the API directly at http://localhost:4000
+# and disables the production-only proxy / read-only / dropped-caps hardening
+# so the stack just works on a developer Mac.
+#
+# Run with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# =============================================================================
+
+services:
+  api:
+    read_only: false
+    cap_drop: []
+    cap_add: []
+    security_opt: []
+    environment:
+      # Allow the web's local origin to call this API
+      CORS_ORIGINS: "http://localhost:8080,http://localhost:5173,http://127.0.0.1:8080"
+    ports:
+      - "127.0.0.1:4000:4000"
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: ../../infra/docker/web.Dockerfile
+      args:
+        # Bake the API URL into the SPA bundle so the browser fetches
+        # directly from the API container's exposed port.
+        VITE_API_URL: "http://localhost:4000"
+    ports:
+      - "127.0.0.1:8080:80"
+
+  # MinIO replaces real AWS S3 for local testing.
+  minio:
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"

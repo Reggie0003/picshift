@@ -1,0 +1,32 @@
+# Production overlay. Wraps the API + web behind an nginx proxy with TLS
+# termination, gzips responses, and enforces strict security headers.
+#
+# Activate with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+services:
+  api:
+    ports: []        # do not expose API directly; only via proxy
+  web:
+    ports: []        # do not expose web directly; only via proxy
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./infra/nginx/certs:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE", "CHOWN", "SETUID", "SETGID"]
+    security_opt:
+      - no-new-privileges:true

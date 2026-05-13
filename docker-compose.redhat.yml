@@ -1,0 +1,33 @@
+# =============================================================================
+# Red Hat / RHEL / Rocky / AlmaLinux production override.
+#
+# Differences from the default compose:
+#   - SELinux-friendly bind mounts (the `:Z` label so SELinux relabels them
+#     for the container — without this, Docker volumes appear empty)
+#   - Logs go to a directory we'll let Docker manage, not a host bind
+#   - Honors firewalld being the firewall (no ufw assumptions)
+#
+# Activate with:
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.prod.yml \
+#                  -f docker-compose.redhat.yml up -d
+# =============================================================================
+
+services:
+  postgres:
+    volumes:
+      - ./infra/data/postgres:/var/lib/postgresql/data:Z
+
+  redis:
+    volumes:
+      - ./infra/data/redis:/data:Z
+
+  minio:
+    volumes:
+      - ./infra/data/minio:/data:Z
+
+  proxy:
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro,Z
+      - ./infra/nginx/conf.d:/etc/nginx/conf.d:ro,Z
+      - ./infra/nginx/certs:/etc/nginx/certs:ro,Z

@@ -12,6 +12,8 @@ import DocumentsPage from "./pages/Documents";
 import AuditPage from "./pages/Audit";
 import SecurityPage from "./pages/Security";
 import AssistantPage from "./pages/Assistant";
+import OrgChartPage from "./pages/OrgChart";
+import TeamCalendarPage from "./pages/TeamCalendar";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -28,6 +30,8 @@ const App = () => (
             <Route path="/auth" element={<Auth />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/pto" element={<PtoPage />} />
+            <Route path="/team-calendar" element={<TeamCalendarPage />} />
+            <Route path="/org-chart" element={<OrgChartPage />} />
             <Route path="/documents" element={<DocumentsPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/settings/security" element={<SecurityPage />} />

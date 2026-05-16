@@ -99,7 +99,7 @@ export interface RequestOptions {
 }
 
 export async function apiRequest<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const url = new URL(`${API_BASE}${path}`);
+  const url = API_BASE.startsWith("http") ? new URL(`${API_BASE}${path}`) : new URL(`${API_BASE}${path}`, window.location.origin);
   if (opts.query) {
     for (const [k, v] of Object.entries(opts.query)) {
       if (v !== undefined) url.searchParams.append(k, String(v));

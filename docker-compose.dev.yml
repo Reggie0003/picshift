@@ -22,8 +22,8 @@ services:
 
   web:
     build:
-      context: ./apps/web
-      dockerfile: ../../infra/docker/web.Dockerfile
+      context: .
+      dockerfile: ./infra/docker/web.Dockerfile
       args:
         # Bake the API URL into the SPA bundle so the browser fetches
         # directly from the API container's exposed port.

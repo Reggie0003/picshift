@@ -100,8 +100,8 @@ services:
 
   web:
     build:
-      context: ./apps/web
-      dockerfile: ../../infra/docker/web.Dockerfile
+      context: .
+      dockerfile: ./infra/docker/web.Dockerfile
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:80"

@@ -2,11 +2,11 @@
   "name": "@picshift/api",
   "version": "0.1.0",
   "private": true,
-  "description": "Pic Shift HR API — Express + TypeScript + Prisma",
+  "description": "Pic Shift HR API \u2014 Express + TypeScript + Prisma",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json && tsc-alias -p tsconfig.json",
+    "start": "node --max-old-space-size=600 dist/server.js",
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings=0",
@@ -15,7 +15,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "seed": "tsx src/db/seed.ts"
+    "seed": "node --max-old-space-size=600 dist/db/seed.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.654.0",
@@ -55,7 +55,8 @@
     "prisma": "^5.20.0",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2",
-    "vitest": "^2.1.1"
+    "vitest": "^2.1.1",
+    "tsc-alias": "^1.8.10"
   },
   "engines": {
     "node": ">=20.10.0"

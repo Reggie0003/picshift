@@ -17,6 +17,27 @@
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? "http://localhost:4000").replace(/\/+$/, "");
 
+/**
+ * Build an absolute URL for fetch().
+ *
+ * VITE_API_URL may be either:
+ *   - Absolute (e.g. http://localhost:4000) — used in dev with separate ports
+ *   - Relative (e.g. /api)                  — used in prod when nginx proxies same-origin
+ * Both forms must resolve cleanly through `new URL`, which requires a base
+ * argument when the first argument is relative.
+ */
+function buildUrl(path: string, query?: Record<string, string | number | boolean | undefined>): string {
+  const isAbsolute = /^https?:\/\//i.test(API_BASE);
+  const base = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+  const url = isAbsolute ? new URL(`${API_BASE}${path}`) : new URL(`${API_BASE}${path}`, base);
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined) url.searchParams.append(k, String(v));
+    }
+  }
+  return url.toString();
+}
+
 const REFRESH_KEY = "picshift.refresh";
 
 let accessToken: string | null = null;
@@ -99,18 +120,13 @@ export interface RequestOptions {
 }
 
 export async function apiRequest<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const url = new URL(`${API_BASE}${path}`);
-  if (opts.query) {
-    for (const [k, v] of Object.entries(opts.query)) {
-      if (v !== undefined) url.searchParams.append(k, String(v));
-    }
-  }
+  const url = buildUrl(path, opts.query);
   const headers: Record<string, string> = { accept: "application/json" };
   if (opts.body !== undefined) headers["content-type"] = "application/json";
   if (!opts.unauthenticated && accessToken) headers.authorization = `Bearer ${accessToken}`;
 
   const doFetch = async (): Promise<Response> =>
-    fetch(url.toString(), {
+    fetch(url, {
       method: opts.method ?? "GET",
       headers,
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),

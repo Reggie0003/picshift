@@ -14,8 +14,12 @@
 // =============================================================================
 
 generator client {
-  provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  provider        = "prisma-client-js"
+  binaryTargets   = ["native", "linux-musl-openssl-3.0.x"]
+  // Required to use the `extensions = [pgcrypto, citext]` line in datasource.
+  // Without this the CLI errors out at `prisma generate`, breaking the API
+  // Docker build at `RUN npx prisma generate`.
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {

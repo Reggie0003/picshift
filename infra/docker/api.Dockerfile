@@ -22,7 +22,12 @@ COPY src ./src
 
 RUN npx prisma generate
 RUN npm run build
-RUN npm prune --omit=dev
+# NOTE: we intentionally keep devDependencies in the final image because
+# `prisma migrate deploy` (the prisma CLI) and the `seed` script (tsx) both
+# live in devDependencies and are run via `docker compose exec api ...` at
+# deploy time. Pruning saves ~50MB but breaks the documented deploy flow.
+# If you want a lean image, move `prisma` + `tsx` to dependencies and add
+# `RUN npm prune --omit=dev` back here.
 
 # ---- final image -----------------------------------------------------------
 FROM node:20-bookworm-slim
